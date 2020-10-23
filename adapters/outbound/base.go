@@ -1,4 +1,4 @@
-package adapters
+package outbound
 
 import (
 	"context"
@@ -6,18 +6,16 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/Dreamacro/clash/common/queue"
 	C "github.com/Dreamacro/clash/constant"
 )
 
-var (
-	defaultURLTestTimeout = time.Second * 5
-)
-
 type Base struct {
 	name string
+	addr string
 	tp   C.AdapterType
 	udp  bool
 }
@@ -30,20 +28,34 @@ func (b *Base) Type() C.AdapterType {
 	return b.tp
 }
 
-func (b *Base) DialUDP(metadata *C.Metadata) (C.PacketConn, net.Addr, error) {
-	return nil, nil, errors.New("no support")
+func (b *Base) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
+	return c, errors.New("no support")
+}
+
+func (b *Base) DialUDP(metadata *C.Metadata) (C.PacketConn, error) {
+	return nil, errors.New("no support")
 }
 
 func (b *Base) SupportUDP() bool {
 	return b.udp
 }
 
-func (b *Base) Destroy() {}
-
 func (b *Base) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]string{
 		"type": b.Type().String(),
 	})
+}
+
+func (b *Base) Addr() string {
+	return b.addr
+}
+
+func (b *Base) Unwrap(metadata *C.Metadata) C.Proxy {
+	return nil
+}
+
+func NewBase(name string, addr string, tp C.AdapterType, udp bool) *Base {
+	return &Base{name, addr, tp, udp}
 }
 
 type conn struct {
@@ -59,7 +71,7 @@ func (c *conn) AppendToChains(a C.ProxyAdapter) {
 	c.chain = append(c.chain, a.Name())
 }
 
-func newConn(c net.Conn, a C.ProxyAdapter) C.Conn {
+func NewConn(c net.Conn, a C.ProxyAdapter) C.Conn {
 	return &conn{c, []string{a.Name()}}
 }
 
@@ -76,18 +88,18 @@ func (c *packetConn) AppendToChains(a C.ProxyAdapter) {
 	c.chain = append(c.chain, a.Name())
 }
 
-func newPacketConn(c net.PacketConn, a C.ProxyAdapter) C.PacketConn {
-	return &packetConn{c, []string{a.Name()}}
+func newPacketConn(pc net.PacketConn, a C.ProxyAdapter) C.PacketConn {
+	return &packetConn{pc, []string{a.Name()}}
 }
 
 type Proxy struct {
 	C.ProxyAdapter
 	history *queue.Queue
-	alive   bool
+	alive   uint32
 }
 
 func (p *Proxy) Alive() bool {
-	return p.alive
+	return atomic.LoadUint32(&p.alive) > 0
 }
 
 func (p *Proxy) Dial(metadata *C.Metadata) (C.Conn, error) {
@@ -99,7 +111,7 @@ func (p *Proxy) Dial(metadata *C.Metadata) (C.Conn, error) {
 func (p *Proxy) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
 	conn, err := p.ProxyAdapter.DialContext(ctx, metadata)
 	if err != nil {
-		p.alive = false
+		atomic.StoreUint32(&p.alive, 0)
 	}
 	return conn, err
 }
@@ -116,7 +128,7 @@ func (p *Proxy) DelayHistory() []C.DelayHistory {
 // LastDelay return last history record. if proxy is not alive, return the max value of uint16.
 func (p *Proxy) LastDelay() (delay uint16) {
 	var max uint16 = 0xffff
-	if !p.alive {
+	if atomic.LoadUint32(&p.alive) == 0 {
 		return max
 	}
 
@@ -140,13 +152,18 @@ func (p *Proxy) MarshalJSON() ([]byte, error) {
 	mapping := map[string]interface{}{}
 	json.Unmarshal(inner, &mapping)
 	mapping["history"] = p.DelayHistory()
+	mapping["name"] = p.Name()
 	return json.Marshal(mapping)
 }
 
 // URLTest get the delay for the specified URL
 func (p *Proxy) URLTest(ctx context.Context, url string) (t uint16, err error) {
 	defer func() {
-		p.alive = err == nil
+		if err == nil {
+			atomic.StoreUint32(&p.alive, 1)
+		} else {
+			atomic.StoreUint32(&p.alive, 0)
+		}
 		record := C.DelayHistory{Time: time.Now()}
 		if err == nil {
 			record.Delay = t
@@ -186,7 +203,12 @@ func (p *Proxy) URLTest(ctx context.Context, url string) (t uint16, err error) {
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
-	client := http.Client{Transport: transport}
+	client := http.Client{
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return
@@ -197,11 +219,5 @@ func (p *Proxy) URLTest(ctx context.Context, url string) (t uint16, err error) {
 }
 
 func NewProxy(adapter C.ProxyAdapter) *Proxy {
-	return &Proxy{adapter, queue.New(10), true}
-}
-
-// ProxyGroupOption contain the common options for all kind of ProxyGroup
-type ProxyGroupOption struct {
-	Name    string   `proxy:"name"`
-	Proxies []string `proxy:"proxies"`
+	return &Proxy{adapter, queue.New(10), 1}
 }

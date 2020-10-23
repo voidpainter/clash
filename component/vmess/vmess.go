@@ -1,13 +1,10 @@
 package vmess
 
 import (
-	"crypto/tls"
 	"fmt"
 	"math/rand"
 	"net"
-	"net/http"
 	"runtime"
-	"sync"
 
 	"github.com/gofrs/uuid"
 )
@@ -38,11 +35,6 @@ var CipherMapping = map[string]byte{
 	"chacha20-poly1305": SecurityCHACHA20POLY1305,
 }
 
-var (
-	clientSessionCache tls.ClientSessionCache
-	once               sync.Once
-)
-
 // Command types
 const (
 	CommandTCP byte = 1
@@ -66,42 +58,23 @@ type DstAddr struct {
 
 // Client is vmess connection generator
 type Client struct {
-	user      []*ID
-	uuid      *uuid.UUID
-	security  Security
-	tls       bool
-	host      string
-	wsConfig  *WebsocketConfig
-	tlsConfig *tls.Config
+	user     []*ID
+	uuid     *uuid.UUID
+	security Security
 }
 
 // Config of vmess
 type Config struct {
-	UUID             string
-	AlterID          uint16
-	Security         string
-	TLS              bool
-	HostName         string
-	Port             string
-	NetWork          string
-	WebSocketPath    string
-	WebSocketHeaders map[string]string
-	SkipCertVerify   bool
-	SessionCache     tls.ClientSessionCache
+	UUID     string
+	AlterID  uint16
+	Security string
+	Port     string
+	HostName string
 }
 
-// New return a Conn with net.Conn and DstAddr
-func (c *Client) New(conn net.Conn, dst *DstAddr) (net.Conn, error) {
-	var err error
+// StreamConn return a Conn with net.Conn and DstAddr
+func (c *Client) StreamConn(conn net.Conn, dst *DstAddr) (net.Conn, error) {
 	r := rand.Intn(len(c.user))
-	if c.wsConfig != nil {
-		conn, err = NewWebsocketConn(conn, c.wsConfig)
-		if err != nil {
-			return nil, err
-		}
-	} else if c.tls {
-		conn = tls.Client(conn, c.tlsConfig)
-	}
 	return newConn(conn, c.user[r], dst, c.security)
 }
 
@@ -126,60 +99,12 @@ func NewClient(config Config) (*Client, error) {
 			security = SecurityAES128GCM
 		}
 	default:
-		return nil, fmt.Errorf("Unknown security type: %s", config.Security)
-	}
-
-	if config.NetWork != "" && config.NetWork != "ws" {
-		return nil, fmt.Errorf("Unknown network type: %s", config.NetWork)
-	}
-
-	header := http.Header{}
-	for k, v := range config.WebSocketHeaders {
-		header.Add(k, v)
-	}
-
-	host := net.JoinHostPort(config.HostName, config.Port)
-
-	var tlsConfig *tls.Config
-	if config.TLS {
-		tlsConfig = &tls.Config{
-			ServerName:         config.HostName,
-			InsecureSkipVerify: config.SkipCertVerify,
-			ClientSessionCache: config.SessionCache,
-		}
-		if tlsConfig.ClientSessionCache == nil {
-			tlsConfig.ClientSessionCache = getClientSessionCache()
-		}
-		if host := header.Get("Host"); host != "" {
-			tlsConfig.ServerName = host
-		}
-	}
-
-	var wsConfig *WebsocketConfig
-	if config.NetWork == "ws" {
-		wsConfig = &WebsocketConfig{
-			Host:      host,
-			Path:      config.WebSocketPath,
-			Headers:   header,
-			TLS:       config.TLS,
-			TLSConfig: tlsConfig,
-		}
+		return nil, fmt.Errorf("unknown security type: %s", config.Security)
 	}
 
 	return &Client{
-		user:      newAlterIDs(newID(&uid), config.AlterID),
-		uuid:      &uid,
-		security:  security,
-		tls:       config.TLS,
-		host:      host,
-		wsConfig:  wsConfig,
-		tlsConfig: tlsConfig,
+		user:     newAlterIDs(newID(&uid), config.AlterID),
+		uuid:     &uid,
+		security: security,
 	}, nil
-}
-
-func getClientSessionCache() tls.ClientSessionCache {
-	once.Do(func() {
-		clientSessionCache = tls.NewLRUClientSessionCache(128)
-	})
-	return clientSessionCache
 }

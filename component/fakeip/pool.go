@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/Dreamacro/clash/common/cache"
+	"github.com/Dreamacro/clash/component/trie"
 )
 
 // Pool is a implementation about fake ip generator without storage
@@ -14,7 +15,9 @@ type Pool struct {
 	min     uint32
 	gateway uint32
 	offset  uint32
-	mux     *sync.Mutex
+	mux     sync.Mutex
+	host    *trie.DomainTrie
+	ipnet   *net.IPNet
 	cache   *cache.LruCache
 }
 
@@ -60,9 +63,41 @@ func (p *Pool) LookBack(ip net.IP) (string, bool) {
 	return "", false
 }
 
+// LookupHost return if domain in host
+func (p *Pool) LookupHost(domain string) bool {
+	if p.host == nil {
+		return false
+	}
+	return p.host.Search(domain) != nil
+}
+
+// Exist returns if given ip exists in fake-ip pool
+func (p *Pool) Exist(ip net.IP) bool {
+	p.mux.Lock()
+	defer p.mux.Unlock()
+
+	if ip = ip.To4(); ip == nil {
+		return false
+	}
+
+	n := ipToUint(ip.To4())
+	offset := n - p.min + 1
+	return p.cache.Exist(offset)
+}
+
 // Gateway return gateway ip
 func (p *Pool) Gateway() net.IP {
 	return uintToIP(p.gateway)
+}
+
+// IPNet return raw ipnet
+func (p *Pool) IPNet() *net.IPNet {
+	return p.ipnet
+}
+
+// PatchFrom clone cache from old pool
+func (p *Pool) PatchFrom(o *Pool) {
+	o.cache.CloneTo(p.cache)
 }
 
 func (p *Pool) get(host string) net.IP {
@@ -92,11 +127,11 @@ func ipToUint(ip net.IP) uint32 {
 }
 
 func uintToIP(v uint32) net.IP {
-	return net.IPv4(byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+	return net.IP{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)}
 }
 
 // New return Pool instance
-func New(ipnet *net.IPNet, size int) (*Pool, error) {
+func New(ipnet *net.IPNet, size int, host *trie.DomainTrie) (*Pool, error) {
 	min := ipToUint(ipnet.IP) + 2
 
 	ones, bits := ipnet.Mask.Size()
@@ -111,7 +146,8 @@ func New(ipnet *net.IPNet, size int) (*Pool, error) {
 		min:     min,
 		max:     max,
 		gateway: min - 1,
-		mux:     &sync.Mutex{},
+		host:    host,
+		ipnet:   ipnet,
 		cache:   cache.NewLRUCache(cache.WithSize(size * 2)),
 	}, nil
 }

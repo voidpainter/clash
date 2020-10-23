@@ -1,10 +1,12 @@
 package observable
 
 import (
-	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func iterator(item []interface{}) chan interface{} {
@@ -23,16 +25,12 @@ func TestObservable(t *testing.T) {
 	iter := iterator([]interface{}{1, 2, 3, 4, 5})
 	src := NewObservable(iter)
 	data, err := src.Subscribe()
-	if err != nil {
-		t.Error(err)
-	}
+	assert.Nil(t, err)
 	count := 0
 	for range data {
 		count++
 	}
-	if count != 5 {
-		t.Error("Revc number error")
-	}
+	assert.Equal(t, count, 5)
 }
 
 func TestObservable_MutilSubscribe(t *testing.T) {
@@ -40,36 +38,30 @@ func TestObservable_MutilSubscribe(t *testing.T) {
 	src := NewObservable(iter)
 	ch1, _ := src.Subscribe()
 	ch2, _ := src.Subscribe()
-	count := 0
+	var count int32
 
 	var wg sync.WaitGroup
 	wg.Add(2)
 	waitCh := func(ch <-chan interface{}) {
 		for range ch {
-			count++
+			atomic.AddInt32(&count, 1)
 		}
 		wg.Done()
 	}
 	go waitCh(ch1)
 	go waitCh(ch2)
 	wg.Wait()
-	if count != 10 {
-		t.Error("Revc number error")
-	}
+	assert.Equal(t, int32(10), count)
 }
 
 func TestObservable_UnSubscribe(t *testing.T) {
 	iter := iterator([]interface{}{1, 2, 3, 4, 5})
 	src := NewObservable(iter)
 	data, err := src.Subscribe()
-	if err != nil {
-		t.Error(err)
-	}
+	assert.Nil(t, err)
 	src.UnSubscribe(data)
 	_, open := <-data
-	if open {
-		t.Error("Revc number error")
-	}
+	assert.False(t, open)
 }
 
 func TestObservable_SubscribeClosedSource(t *testing.T) {
@@ -79,9 +71,7 @@ func TestObservable_SubscribeClosedSource(t *testing.T) {
 	<-data
 
 	_, closed := src.Subscribe()
-	if closed == nil {
-		t.Error("Observable should be closed")
-	}
+	assert.NotNil(t, closed)
 }
 
 func TestObservable_UnSubscribeWithNotExistSubscription(t *testing.T) {
@@ -92,9 +82,6 @@ func TestObservable_UnSubscribeWithNotExistSubscription(t *testing.T) {
 }
 
 func TestObservable_SubscribeGoroutineLeak(t *testing.T) {
-	// waiting for other goroutine recycle
-	time.Sleep(120 * time.Millisecond)
-	init := runtime.NumGoroutine()
 	iter := iterator([]interface{}{1, 2, 3, 4, 5})
 	src := NewObservable(iter)
 	max := 100
@@ -117,8 +104,43 @@ func TestObservable_SubscribeGoroutineLeak(t *testing.T) {
 		go waitCh(ch)
 	}
 	wg.Wait()
-	now := runtime.NumGoroutine()
-	if init != now {
-		t.Errorf("Goroutine Leak: init %d now %d", init, now)
+
+	for _, sub := range list {
+		_, more := <-sub
+		assert.False(t, more)
 	}
+
+	_, more := <-list[0]
+	assert.False(t, more)
+}
+
+func Benchmark_Observable_1000(b *testing.B) {
+	ch := make(chan interface{})
+	o := NewObservable(ch)
+	num := 1000
+
+	subs := []Subscription{}
+	for i := 0; i < num; i++ {
+		sub, _ := o.Subscribe()
+		subs = append(subs, sub)
+	}
+
+	wg := sync.WaitGroup{}
+	wg.Add(num)
+
+	b.ResetTimer()
+	for _, sub := range subs {
+		go func(s Subscription) {
+			for range s {
+			}
+			wg.Done()
+		}(sub)
+	}
+
+	for i := 0; i < b.N; i++ {
+		ch <- i
+	}
+
+	close(ch)
+	wg.Wait()
 }
